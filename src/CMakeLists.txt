@@ -1,44 +1,46 @@
 cmake_minimum_required(VERSION 3.10)
-
-# Find OpenMP package
-find_package(OpenMP REQUIRED)
+set(CMAKE_CXX_STANDARD 17)
 
 add_library(studentlib main.cpp)
 target_include_directories(studentlib PUBLIC ${CMAKE_SOURCE_DIR}/include)
 
-# CPU-specific optimizations
+# Optimize for the specific CPU architecture
 target_compile_options(studentlib PRIVATE
-    -O3 
+    -O3
     -march=native
     -mtune=native
-    -flto
-    -ffast-math
+    -mavx2
+    -mfma
+    -mbmi
+    -mbmi2
+    -mpopcnt
     -funroll-loops
-    -fprefetch-loop-arrays
     -ftree-vectorize
-    -mavx512f
-    -mavx512cd
-    -mavx512bw
-    -mavx512dq
-    -mavx512vl
+    -ffast-math
+    -ftree-parallelize-loops=64
+    -fno-signed-zeros
 )
 
-# Additional compiler flags
-target_compile_definitions(studentlib PRIVATE 
-    -DNDEBUG
-)
+# Enable OpenMP with aggressive optimization
+find_package(OpenMP REQUIRED)
+if(OpenMP_FOUND)
+    target_compile_options(studentlib PRIVATE ${OpenMP_CXX_FLAGS})
+    target_link_libraries(studentlib PRIVATE ${OpenMP_CXX_LIBRARIES})
+    
+    # Set OpenMP to use all available CPU cores
+    add_definitions(-DOMP_NUM_THREADS=64)
+endif()
 
-# Link time optimization
-set_target_properties(studentlib PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+# Enable interprocedural (link-time) optimization
+include(CheckIPOSupported)
+check_ipo_supported(RESULT ipo_supported)
+if(ipo_supported)
+    set_property(TARGET studentlib PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
 
-# Add OpenMP flags
-target_link_libraries(studentlib PRIVATE OpenMP::OpenMP_CXX)
-
-# Optional NUMA support if available
-find_package(PkgConfig)
-pkg_check_modules(NUMA QUIET numa)
-if(NUMA_FOUND)
-    target_link_libraries(studentlib PRIVATE ${NUMA_LIBRARIES})
-    target_include_directories(studentlib PRIVATE ${NUMA_INCLUDE_DIRS})
-    target_compile_definitions(studentlib PRIVATE -DUSE_NUMA)
+# Allocator optimization
+add_definitions(-DUSE_JEMALLOC)
+find_library(JEMALLOC_LIBRARY jemalloc)
+if(JEMALLOC_LIBRARY)
+    target_link_libraries(studentlib PRIVATE ${JEMALLOC_LIBRARY})
 endif()
