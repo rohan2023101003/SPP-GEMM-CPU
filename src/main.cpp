@@ -95,11 +95,9 @@ namespace solution {
                              const float* __restrict__ B, 
                              float* __restrict__ C,
                              int n, int k, int m) {
-        // Temporary buffer for packing blocks of A and B for better memory access
-        // Using thread-local storage to avoid reallocation
-        #pragma omp threadprivate(A_packed, B_packed)
-        static float* A_packed = nullptr;
-        static float* B_packed = nullptr;
+        // Declare packed buffers first before marking them threadprivate
+        static thread_local float* A_packed = nullptr;
+        static thread_local float* B_packed = nullptr;
         
         // Lazy allocation of packed buffers
         if (!A_packed) A_packed = allocate_aligned(BLOCK_SIZE_N * BLOCK_SIZE_K);
@@ -168,15 +166,6 @@ namespace solution {
         }
     }
     
-    // Helper function to transpose a matrix block for better memory access
-    static void transpose_block(const float* src, float* dst, int rows, int cols, int src_stride, int dst_stride) {
-        for (int i = 0; i < rows; ++i) {
-            for (int j = 0; j < cols; ++j) {
-                dst[j * dst_stride + i] = src[i * src_stride + j];
-            }
-        }
-    }
-
     std::string compute(const std::string &m1_path, const std::string &m2_path, int n, int k, int m) {
         std::string sol_path = std::filesystem::temp_directory_path() / "student_sol.dat";
 
@@ -192,61 +181,59 @@ namespace solution {
         float* m2 = allocate_aligned(k * m);
         float* result = allocate_aligned(n * m);
         
-        // Helper lambda for reading binary files efficiently
-        auto read_binary_file = [&](const std::string& path, float* data, size_t size) {
-            FILE* fp = fopen(path.c_str(), "rb");
-            if (!fp) {
-                throw std::runtime_error("Failed to open file: " + path);
+        // Read input files efficiently
+        {
+            std::ifstream m1_fs(m1_path, std::ios::binary);
+            if (!m1_fs) {
+                throw std::runtime_error("Failed to open file: " + m1_path);
             }
             
-            // Set larger buffer
-            setvbuf(fp, nullptr, _IOFBF, BUFFER_SIZE);
+            // Use buffer for better I/O performance
+            std::vector<char> buffer(BUFFER_SIZE);
+            m1_fs.rdbuf()->pubsetbuf(buffer.data(), buffer.size());
             
-            // Read in one go
-            size_t read = fread(data, sizeof(float), size, fp);
-            fclose(fp);
+            // Read matrix data
+            m1_fs.read(reinterpret_cast<char*>(m1), n * k * sizeof(float));
+            m1_fs.close();
+        }
+        
+        {
+            std::ifstream m2_fs(m2_path, std::ios::binary);
+            if (!m2_fs) {
+                throw std::runtime_error("Failed to open file: " + m2_path);
+            }
             
-            if (read != size) {
-                throw std::runtime_error("Failed to read complete data from: " + path);
-            }
-        };
-        
-        // Read input files
-        read_binary_file(m1_path, m1, n * k);
-        read_binary_file(m2_path, m2, k * m);
-        
-        // Transpose m2 for better cache locality during access
-        float* m2_transposed = allocate_aligned(k * m);
-        
-        #pragma omp parallel for schedule(static)
-        for (int i = 0; i < k; i += BLOCK_SIZE_K) {
-            for (int j = 0; j < m; j += BLOCK_SIZE_M) {
-                int ib = std::min(BLOCK_SIZE_K, k - i);
-                int jb = std::min(BLOCK_SIZE_M, m - j);
-                transpose_block(&m2[i * m + j], &m2_transposed[j * k + i], ib, jb, m, k);
-            }
+            // Use buffer for better I/O performance
+            std::vector<char> buffer(BUFFER_SIZE);
+            m2_fs.rdbuf()->pubsetbuf(buffer.data(), buffer.size());
+            
+            // Read matrix data
+            m2_fs.read(reinterpret_cast<char*>(m2), k * m * sizeof(float));
+            m2_fs.close();
         }
         
         // Start computation
         compute_block(m1, m2, result, n, k, m);
         
         // Write results efficiently
-        FILE* fp = fopen(sol_path.c_str(), "wb");
-        if (!fp) {
-            throw std::runtime_error("Failed to open output file: " + sol_path);
+        {
+            std::ofstream sol_fs(sol_path, std::ios::binary);
+            if (!sol_fs) {
+                throw std::runtime_error("Failed to open output file: " + sol_path);
+            }
+            
+            // Use buffer for better I/O performance
+            std::vector<char> buffer(BUFFER_SIZE);
+            sol_fs.rdbuf()->pubsetbuf(buffer.data(), buffer.size());
+            
+            // Write matrix data
+            sol_fs.write(reinterpret_cast<char*>(result), n * m * sizeof(float));
+            sol_fs.close();
         }
-        
-        // Set larger buffer
-        setvbuf(fp, nullptr, _IOFBF, BUFFER_SIZE);
-        
-        // Write in one go
-        fwrite(result, sizeof(float), n * m, fp);
-        fclose(fp);
         
         // Free allocated memory
         free(m1);
         free(m2);
-        free(m2_transposed);
         free(result);
         
         return sol_path;

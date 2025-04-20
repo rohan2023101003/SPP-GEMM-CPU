@@ -17,8 +17,6 @@ target_compile_options(studentlib PRIVATE
     -funroll-loops
     -ftree-vectorize
     -ffast-math
-    -ftree-parallelize-loops=64
-    -fno-signed-zeros
 )
 
 # Enable OpenMP with aggressive optimization
@@ -26,21 +24,13 @@ find_package(OpenMP REQUIRED)
 if(OpenMP_FOUND)
     target_compile_options(studentlib PRIVATE ${OpenMP_CXX_FLAGS})
     target_link_libraries(studentlib PRIVATE ${OpenMP_CXX_LIBRARIES})
-    
-    # Set OpenMP to use all available CPU cores
-    add_definitions(-DOMP_NUM_THREADS=64)
 endif()
 
 # Enable interprocedural (link-time) optimization
 include(CheckIPOSupported)
-check_ipo_supported(RESULT ipo_supported)
+check_ipo_supported(RESULT ipo_supported OUTPUT error)
 if(ipo_supported)
     set_property(TARGET studentlib PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
-endif()
-
-# Allocator optimization
-add_definitions(-DUSE_JEMALLOC)
-find_library(JEMALLOC_LIBRARY jemalloc)
-if(JEMALLOC_LIBRARY)
-    target_link_libraries(studentlib PRIVATE ${JEMALLOC_LIBRARY})
+else()
+    message(STATUS "IPO/LTO not supported: ${error}")
 endif()
