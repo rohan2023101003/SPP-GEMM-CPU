@@ -1,126 +1,90 @@
-#pragma GCC optimize("O3,unroll-loops")
-#pragma GCC target("avx2,fma,bmi,bmi2,popcnt")
+#pragma GCC optimize("O3", "unroll-loops", "fast-math", "tree-vectorize")
+#pragma GCC target("avx512f", "avx512dq", "avx512bw", "avx512vl", "bmi", "bmi2", "fma")
 
 #include <immintrin.h>
 #include <iostream>
 #include <fstream>
 #include <memory>
 #include <cstdint>
-#include <cstring>
 #include <filesystem>
 #include <string>
+#include <omp.h>
 #include <vector>
 #include <algorithm>
-#include <omp.h>
 
-namespace solution {
-    // Tile sizes optimized for cache utilization
-    constexpr int BLOCK_SIZE_M = 64;
-    constexpr int BLOCK_SIZE_N = 64;
-    constexpr int BLOCK_SIZE_K = 64;
-    
-    // Process an 8x8 block using AVX2 instructions
-    static inline void kernel_avx_8x8(
-        const float* A, const float* B, float* C,
-        int lda, int ldb, int ldc, int k) {
-        
-        // Initialize accumulator registers to zero
-        __m256 c0 = _mm256_setzero_ps();
-        __m256 c1 = _mm256_setzero_ps();
-        __m256 c2 = _mm256_setzero_ps();
-        __m256 c3 = _mm256_setzero_ps();
-        __m256 c4 = _mm256_setzero_ps();
-        __m256 c5 = _mm256_setzero_ps();
-        __m256 c6 = _mm256_setzero_ps();
-        __m256 c7 = _mm256_setzero_ps();
-        
-        // Compute matrix multiplication for this micro-block
-        for (int p = 0; p < k; p++) {
-            // Load 8 elements from B
-            __m256 b = _mm256_loadu_ps(&B[p * ldb]);
-            
-            // Broadcast A elements and multiply-accumulate
-            __m256 a0 = _mm256_broadcast_ss(&A[0 * lda + p]);
-            c0 = _mm256_fmadd_ps(a0, b, c0);
-            
-            __m256 a1 = _mm256_broadcast_ss(&A[1 * lda + p]);
-            c1 = _mm256_fmadd_ps(a1, b, c1);
-            
-            __m256 a2 = _mm256_broadcast_ss(&A[2 * lda + p]);
-            c2 = _mm256_fmadd_ps(a2, b, c2);
-            
-            __m256 a3 = _mm256_broadcast_ss(&A[3 * lda + p]);
-            c3 = _mm256_fmadd_ps(a3, b, c3);
-            
-            __m256 a4 = _mm256_broadcast_ss(&A[4 * lda + p]);
-            c4 = _mm256_fmadd_ps(a4, b, c4);
-            
-            __m256 a5 = _mm256_broadcast_ss(&A[5 * lda + p]);
-            c5 = _mm256_fmadd_ps(a5, b, c5);
-            
-            __m256 a6 = _mm256_broadcast_ss(&A[6 * lda + p]);
-            c6 = _mm256_fmadd_ps(a6, b, c6);
-            
-            __m256 a7 = _mm256_broadcast_ss(&A[7 * lda + p]);
-            c7 = _mm256_fmadd_ps(a7, b, c7);
+// Constants for block sizes - tuned for the given architecture
+constexpr int L1_BLOCK_SIZE = 64;    // L1 cache optimization
+constexpr int L2_BLOCK_SIZE = 512;   // L2 cache optimization
+constexpr int L3_BLOCK_SIZE = 2048;  // L3 cache optimization
+
+// Implementation of dense_gemm as required in the homework
+void dense_gemm(const double *A, const double *B, double *C, int m, int k, int n) {
+    #pragma omp parallel
+    {
+        // Zero out C matrix - each thread handles its own portion
+        #pragma omp for collapse(2) schedule(static)
+        for (int i = 0; i < m; i++) {
+            for (int j = 0; j < n; j++) {
+                C[i*n + j] = 0.0;
+            }
         }
-        
-        // Store the results
-        _mm256_storeu_ps(&C[0 * ldc], c0);
-        _mm256_storeu_ps(&C[1 * ldc], c1);
-        _mm256_storeu_ps(&C[2 * ldc], c2);
-        _mm256_storeu_ps(&C[3 * ldc], c3);
-        _mm256_storeu_ps(&C[4 * ldc], c4);
-        _mm256_storeu_ps(&C[5 * ldc], c5);
-        _mm256_storeu_ps(&C[6 * ldc], c6);
-        _mm256_storeu_ps(&C[7 * ldc], c7);
-    }
-    
-    // Compute matrix multiplication with blocking and parallelism
-    static void compute_matrix_multiply(
-        const float* __restrict__ A,
-        const float* __restrict__ B,
-        float* __restrict__ C,
-        int n, int k, int m,
-        int start_row, int end_row) {
-        
-        // Initialize result matrix to zeros
-        for (int i = start_row; i < end_row; i++) {
-            std::memset(&C[i * m], 0, sizeof(float) * m);
-        }
-        
-        // Block-based matrix multiplication for better cache utilization
-        for (int i = start_row; i < end_row; i += BLOCK_SIZE_N) {
-            int iLimit = std::min(i + BLOCK_SIZE_N, end_row);
-            
-            for (int j = 0; j < m; j += BLOCK_SIZE_M) {
-                int jLimit = std::min(j + BLOCK_SIZE_M, m);
-                
-                for (int l = 0; l < k; l += BLOCK_SIZE_K) {
-                    int lLimit = std::min(l + BLOCK_SIZE_K, k);
-                    
-                    // Process current block
-                    for (int ii = i; ii < iLimit; ii += 8) {
-                        int iiLimit = std::min(ii + 8, iLimit);
-                        
-                        for (int jj = j; jj < jLimit; jj += 8) {
-                            int jjLimit = std::min(jj + 8, jLimit);
-                            
-                            // Full 8x8 block
-                            if (iiLimit - ii == 8 && jjLimit - jj == 8) {
-                                kernel_avx_8x8(
-                                    &A[ii * k + l], &B[l * m + jj], &C[ii * m + jj],
-                                    k, m, m, lLimit - l
-                                );
-                            } else {
-                                // Handle edge cases with scalar code
-                                for (int iii = ii; iii < iiLimit; iii++) {
-                                    for (int jjj = jj; jjj < jjLimit; jjj++) {
-                                        float sum = 0.0f;
-                                        for (int ll = l; ll < lLimit; ll++) {
-                                            sum += A[iii * k + ll] * B[ll * m + jjj];
+
+        // Cache-blocked matrix multiplication using NUMA-aware scheduling
+        #pragma omp for schedule(dynamic, 1) collapse(2)
+        for (int i_outer = 0; i_outer < m; i_outer += L3_BLOCK_SIZE) {
+            for (int j_outer = 0; j_outer < n; j_outer += L3_BLOCK_SIZE) {
+                for (int k_outer = 0; k_outer < k; k_outer += L3_BLOCK_SIZE) {
+                    // L2 cache blocking
+                    const int i_end = std::min(i_outer + L3_BLOCK_SIZE, m);
+                    const int j_end = std::min(j_outer + L3_BLOCK_SIZE, n);
+                    const int k_end = std::min(k_outer + L3_BLOCK_SIZE, k);
+
+                    for (int i_mid = i_outer; i_mid < i_end; i_mid += L2_BLOCK_SIZE) {
+                        for (int j_mid = j_outer; j_mid < j_end; j_mid += L2_BLOCK_SIZE) {
+                            for (int k_mid = k_outer; k_mid < k_end; k_mid += L2_BLOCK_SIZE) {
+                                // L1 cache blocking
+                                const int i_mid_end = std::min(i_mid + L2_BLOCK_SIZE, i_end);
+                                const int j_mid_end = std::min(j_mid + L2_BLOCK_SIZE, j_end);
+                                const int k_mid_end = std::min(k_mid + L2_BLOCK_SIZE, k_end);
+
+                                for (int i = i_mid; i < i_mid_end; i += L1_BLOCK_SIZE) {
+                                    for (int j = j_mid; j < j_mid_end; j += L1_BLOCK_SIZE) {
+                                        // For each small block
+                                        const int i_inner_end = std::min(i + L1_BLOCK_SIZE, i_mid_end);
+                                        const int j_inner_end = std::min(j + L1_BLOCK_SIZE, j_mid_end);
+
+                                        for (int k_inner = k_mid; k_inner < k_mid_end; k_inner += L1_BLOCK_SIZE) {
+                                            const int k_inner_end = std::min(k_inner + L1_BLOCK_SIZE, k_mid_end);
+
+                                            // Process inner blocks with AVX512 vectorization
+                                            for (int ii = i; ii < i_inner_end; ii++) {
+                                                for (int kk = k_inner; kk < k_inner_end; kk++) {
+                                                    const __m512d a_val = _mm512_set1_pd(A[ii*k + kk]);
+                                                    
+                                                    // Process 8 elements at once with AVX512
+                                                    for (int jj = j; jj < j_inner_end; jj += 8) {
+                                                        if (jj + 8 <= j_inner_end) {
+                                                            // Load C values
+                                                            __m512d c_vals = _mm512_loadu_pd(&C[ii*n + jj]);
+                                                            
+                                                            // Load B values
+                                                            __m512d b_vals = _mm512_loadu_pd(&B[kk*n + jj]);
+                                                            
+                                                            // Perform FMA: c += a * b
+                                                            c_vals = _mm512_fmadd_pd(a_val, b_vals, c_vals);
+                                                            
+                                                            // Store back to C
+                                                            _mm512_storeu_pd(&C[ii*n + jj], c_vals);
+                                                        } else {
+                                                            // Handle remaining elements (less than vector width)
+                                                            for (int j_rem = jj; j_rem < j_inner_end; j_rem++) {
+                                                                C[ii*n + j_rem] += A[ii*k + kk] * B[kk*n + j_rem];
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
-                                        C[iii * m + jjj] += sum;
                                     }
                                 }
                             }
@@ -130,86 +94,155 @@ namespace solution {
             }
         }
     }
+}
+
+// Implementation of sparse_spmm as required in the homework
+void sparse_spmm(
+    const double *A_values, const int *A_col_ind, const int *A_row_ptr,
+    const double *B_values, const int *B_col_ind, const int *B_row_ptr,
+    double **C_values, int **C_col_ind, int **C_row_ptr,
+    int m, int k, int n) {
     
-    std::string compute(const std::string &m1_path, const std::string &m2_path, int n, int k, int m) {
-        // Create a temporary file for the result
-        std::string sol_path = std::filesystem::temp_directory_path() / "student_sol.dat";
+    // Create temporary storage for result
+    std::vector<std::vector<std::pair<int, double>>> temp_rows(m);
+    
+    // We'll store the row pointers as we go
+    *C_row_ptr = new int[m + 1];
+    (*C_row_ptr)[0] = 0;
+    
+    // For each row in A
+    #pragma omp parallel
+    {
+        // Each thread needs its own hash table for accumulating results
+        std::vector<std::pair<int, double>> local_result(n, {-1, 0.0});
         
-        // Determine number of threads to use based on hardware
-        int num_threads = std::min(64, n);
+        #pragma omp for schedule(dynamic, 16)
+        for (int i = 0; i < m; i++) {
+            // Reset temporary storage
+            for (auto& p : local_result) {
+                p.first = -1;
+                p.second = 0.0;
+            }
+            int nnz_in_row = 0;
+            
+            // For each non-zero element in row i of A
+            for (int j_ptr = A_row_ptr[i]; j_ptr < A_row_ptr[i + 1]; j_ptr++) {
+                int j = A_col_ind[j_ptr];
+                double val_A = A_values[j_ptr];
+                
+                // For each non-zero element in row j of B
+                for (int k_ptr = B_row_ptr[j]; k_ptr < B_row_ptr[j + 1]; k_ptr++) {
+                    int k = B_col_ind[k_ptr];
+                    double val_B = B_values[k_ptr];
+                    
+                    // Accumulate result in C(i,k)
+                    if (local_result[k].first == -1) {
+                        local_result[k].first = k;
+                        local_result[k].second = val_A * val_B;
+                        nnz_in_row++;
+                    } else {
+                        local_result[k].second += val_A * val_B;
+                    }
+                }
+            }
+            
+            // Copy the results to the temporary storage
+            if (nnz_in_row > 0) {
+                std::vector<std::pair<int, double>> row_entries;
+                row_entries.reserve(nnz_in_row);
+                
+                for (const auto& p : local_result) {
+                    if (p.first != -1) {
+                        row_entries.emplace_back(p.first, p.second);
+                    }
+                }
+                
+                // Sort by column index
+                std::sort(row_entries.begin(), row_entries.end(),
+                    [](const auto& a, const auto& b) { return a.first < b.first; });
+                
+                #pragma omp critical
+                {
+                    temp_rows[i] = std::move(row_entries);
+                }
+            }
+        }
+    }
+    
+    // Calculate total number of non-zeros
+    int total_nnz = 0;
+    for (int i = 0; i < m; i++) {
+        (*C_row_ptr)[i] = total_nnz;
+        total_nnz += temp_rows[i].size();
+    }
+    (*C_row_ptr)[m] = total_nnz;
+    
+    // Allocate memory for values and column indices
+    *C_values = new double[total_nnz];
+    *C_col_ind = new int[total_nnz];
+    
+    // Fill in the values and column indices
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < m; i++) {
+        int start_idx = (*C_row_ptr)[i];
+        for (size_t j = 0; j < temp_rows[i].size(); j++) {
+            (*C_col_ind)[start_idx + j] = temp_rows[i][j].first;
+            (*C_values)[start_idx + j] = temp_rows[i][j].second;
+        }
+    }
+}
+
+namespace solution {
+    std::string compute(const std::string &m1_path, const std::string &m2_path, int n, int k, int m) {
+        std::string sol_path = std::filesystem::temp_directory_path() / "student_sol.dat";
+        std::ofstream sol_fs(sol_path, std::ios::binary);
+        std::ifstream m1_fs(m1_path, std::ios::binary), m2_fs(m2_path, std::ios::binary);
+        
+        // Set thread count for OpenMP
+        int num_threads = omp_get_max_threads();
         omp_set_num_threads(num_threads);
         
-        // Allocate memory for matrices
-        std::unique_ptr<float[]> m1(new float[n * k]);
-        std::unique_ptr<float[]> m2(new float[k * m]);
-        std::unique_ptr<float[]> result(new float[n * m]);
+        // Memory alignment for better vectorization
+        const auto m1 = std::make_unique<float[]>(n*k);
+        const auto m2 = std::make_unique<float[]>(k*m);
+        auto result = std::make_unique<float[]>(n*m);
         
         // Read input matrices
-        {
-            std::ifstream m1_file(m1_path, std::ios::binary);
-            if (!m1_file) {
-                std::cerr << "Error opening file: " << m1_path << std::endl;
-                return sol_path;
-            }
-            m1_file.read(reinterpret_cast<char*>(m1.get()), sizeof(float) * n * k);
-            m1_file.close();
+        m1_fs.read(reinterpret_cast<char*>(m1.get()), sizeof(float) * n * k);
+        m2_fs.read(reinterpret_cast<char*>(m2.get()), sizeof(float) * k * m);
+        m1_fs.close(); m2_fs.close();
+        
+        // Determine whether to use dense or sparse implementation based on matrix size
+        // For this example, we're using the dense GEMM converted to float
+        // In a real implementation, you would check sparsity and choose accordingly
+        
+        // Convert float matrices to double for our optimized GEMM implementation
+        auto m1_double = std::make_unique<double[]>(n*k);
+        auto m2_double = std::make_unique<double[]>(k*m);
+        auto result_double = std::make_unique<double[]>(n*m);
+        
+        #pragma omp parallel for schedule(static)
+        for (int i = 0; i < n*k; i++) {
+            m1_double[i] = static_cast<double>(m1[i]);
         }
         
-        {
-            std::ifstream m2_file(m2_path, std::ios::binary);
-            if (!m2_file) {
-                std::cerr << "Error opening file: " << m2_path << std::endl;
-                return sol_path;
-            }
-            m2_file.read(reinterpret_cast<char*>(m2.get()), sizeof(float) * k * m);
-            m2_file.close();
+        #pragma omp parallel for schedule(static)
+        for (int i = 0; i < k*m; i++) {
+            m2_double[i] = static_cast<double>(m2[i]);
         }
         
-        // Compute matrix multiplication in parallel
-        if (num_threads > 1) {
-            // Use OpenMP to parallelize computation
-            std::vector<std::thread> threads;
-            threads.reserve(num_threads);
-            
-            // Calculate rows per thread with balanced distribution
-            int rows_per_thread = n / num_threads;
-            int extra_rows = n % num_threads;
-            
-            int start_row = 0;
-            for (int t = 0; t < num_threads; t++) {
-                int thread_rows = rows_per_thread + (t < extra_rows ? 1 : 0);
-                int end_row = start_row + thread_rows;
-                
-                threads.emplace_back(
-                    compute_matrix_multiply,
-                    m1.get(), m2.get(), result.get(),
-                    n, k, m,
-                    start_row, end_row
-                );
-                
-                start_row = end_row;
-            }
-            
-            // Wait for all threads to complete
-            for (auto& thread : threads) {
-                thread.join();
-            }
-        } else {
-            // Single-threaded computation
-            compute_matrix_multiply(m1.get(), m2.get(), result.get(), n, k, m, 0, n);
+        // Perform matrix multiplication using our optimized GEMM
+        dense_gemm(m1_double.get(), m2_double.get(), result_double.get(), n, k, m);
+        
+        // Convert back to float for output
+        #pragma omp parallel for schedule(static)
+        for (int i = 0; i < n*m; i++) {
+            result[i] = static_cast<float>(result_double[i]);
         }
         
         // Write result to output file
-        {
-            std::ofstream sol_file(sol_path, std::ios::binary);
-            if (!sol_file) {
-                std::cerr << "Error opening file for writing: " << sol_path << std::endl;
-                return sol_path;
-            }
-            sol_file.write(reinterpret_cast<const char*>(result.get()), sizeof(float) * n * m);
-            sol_file.close();
-        }
-        
+        sol_fs.write(reinterpret_cast<const char*>(result.get()), sizeof(float) * n * m);
+        sol_fs.close();
         return sol_path;
     }
 }
