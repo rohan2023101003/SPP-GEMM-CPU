@@ -36,7 +36,7 @@ int main(int argc, char *argv[]){
 		std::int32_t n = std::atoi(argv[1]), k = std::atoi(argv[2]), m = std::atoi(argv[3]);
 		// Util func
 		std::function<float(void)> generateRandomfloat = [&](){
-			static std::uniform_real_distribution<float> distribution(0.0, 100.0);
+			static std::uniform_real_distribution<float> distribution(0.0, 1.0);
 			return distribution(rng);
 		};
 		// Create psuedo-bitmap file
@@ -89,7 +89,7 @@ int main(int argc, char *argv[]){
 		const std::size_t file_size = n * m;
 		const auto sol_data = reinterpret_cast<float*>(mmap(nullptr, file_size * sizeof(float), PROT_READ, MAP_PRIVATE, fd_sol, 0));
 		const auto student_data = reinterpret_cast<float*>(mmap(nullptr, file_size * sizeof(float), PROT_READ, MAP_PRIVATE, fd_student, 0));
-		constexpr const float error_threshold = 1e-2;
+		constexpr const float error_threshold = 1e-3;
 		std::uint32_t remaining = 0;
 		#ifdef __AVX512F__
 			const __m512 threshold_vec = _mm512_set1_ps(error_threshold);
