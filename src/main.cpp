@@ -53,74 +53,86 @@ namespace solution {
         const int KC = 256; // Block size for inner loop - k dimension
         const int NC = 2048; // Block size for outer loop - n dimension
 
+        // Flag to indicate memory allocation failure
+        bool allocation_failed = false;
+
         // Multi-level blocking for better cache utilization
-        #pragma omp parallel
+        #pragma omp parallel shared(allocation_failed)
         {
             // Thread-local buffer for accumulation
             float* local_C = static_cast<float*>(_mm_malloc(sizeof(float) * MC * NC, alignment));
+            
             if (!local_C) {
-                std::cerr << "Thread local memory allocation failed" << std::endl;
-                return;
+                allocation_failed = true;
+                #pragma omp barrier
             }
-
-            #pragma omp for schedule(dynamic, 1)
-            for (int i_block = 0; i_block < n; i_block += MC) {
-                const int i_limit = std::min(i_block + MC, n);
-                
-                for (int j_block = 0; j_block < m; j_block += NC) {
-                    const int j_limit = std::min(j_block + NC, m);
+            
+            if (!allocation_failed) {
+                #pragma omp for schedule(dynamic, 1)
+                for (int i_block = 0; i_block < n; i_block += MC) {
+                    const int i_limit = std::min(i_block + MC, n);
                     
-                    // Zero the local accumulation buffer
-                    for (int i = 0; i < (i_limit - i_block); ++i) {
-                        for (int j = 0; j < (j_limit - j_block); ++j) {
-                            local_C[i * NC + j] = 0.0f;
-                        }
-                    }
-                    
-                    // Compute block of C
-                    for (int k_block = 0; k_block < k; k_block += KC) {
-                        const int k_limit = std::min(k_block + KC, k);
+                    for (int j_block = 0; j_block < m; j_block += NC) {
+                        const int j_limit = std::min(j_block + NC, m);
                         
-                        // Compute micro-kernel
-                        for (int i = i_block; i < i_limit; ++i) {
-                            const int local_i = i - i_block;
+                        // Zero the local accumulation buffer
+                        for (int i = 0; i < (i_limit - i_block); ++i) {
+                            for (int j = 0; j < (j_limit - j_block); ++j) {
+                                local_C[i * NC + j] = 0.0f;
+                            }
+                        }
+                        
+                        // Compute block of C
+                        for (int k_block = 0; k_block < k; k_block += KC) {
+                            const int k_limit = std::min(k_block + KC, k);
                             
-                            for (int kk = k_block; kk < k_limit; ++kk) {
-                                const float a_val = m1[i * k + kk];
-                                const __m512 a_vec = _mm512_set1_ps(a_val);
+                            // Compute micro-kernel
+                            for (int i = i_block; i < i_limit; ++i) {
+                                const int local_i = i - i_block;
                                 
-                                for (int j = j_block; j < j_limit; j += 16) {
-                                    if (j + 16 <= j_limit) {
-                                        // Load, multiply and accumulate with AVX-512
-                                        const __m512 b_vec = _mm512_loadu_ps(&m2[kk * m + j]);
-                                        const __m512 c_vec = _mm512_loadu_ps(&local_C[local_i * NC + (j - j_block)]);
-                                        const __m512 result_vec = _mm512_fmadd_ps(a_vec, b_vec, c_vec);
-                                        _mm512_storeu_ps(&local_C[local_i * NC + (j - j_block)], result_vec);
-                                    } else {
-                                        // Handle edge case with remainder
-                                        for (int jj = j; jj < j_limit; ++jj) {
-                                            local_C[local_i * NC + (jj - j_block)] += a_val * m2[kk * m + jj];
+                                for (int kk = k_block; kk < k_limit; ++kk) {
+                                    const float a_val = m1[i * k + kk];
+                                    const __m512 a_vec = _mm512_set1_ps(a_val);
+                                    
+                                    for (int j = j_block; j < j_limit; j += 16) {
+                                        if (j + 16 <= j_limit) {
+                                            // Load, multiply and accumulate with AVX-512
+                                            const __m512 b_vec = _mm512_loadu_ps(&m2[kk * m + j]);
+                                            const __m512 c_vec = _mm512_loadu_ps(&local_C[local_i * NC + (j - j_block)]);
+                                            const __m512 result_vec = _mm512_fmadd_ps(a_vec, b_vec, c_vec);
+                                            _mm512_storeu_ps(&local_C[local_i * NC + (j - j_block)], result_vec);
+                                        } else {
+                                            // Handle edge case with remainder
+                                            for (int jj = j; jj < j_limit; ++jj) {
+                                                local_C[local_i * NC + (jj - j_block)] += a_val * m2[kk * m + jj];
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
-                    
-                    // Write the block of local_C back to result matrix
-                    #pragma omp critical
-                    {
-                        for (int i = i_block; i < i_limit; ++i) {
-                            const int local_i = i - i_block;
-                            for (int j = j_block; j < j_limit; ++j) {
-                                result[i * m + j] = local_C[local_i * NC + (j - j_block)];
+                        
+                        // Write the block of local_C back to result matrix
+                        #pragma omp critical
+                        {
+                            for (int i = i_block; i < i_limit; ++i) {
+                                const int local_i = i - i_block;
+                                for (int j = j_block; j < j_limit; ++j) {
+                                    result[i * m + j] = local_C[local_i * NC + (j - j_block)];
+                                }
                             }
                         }
                     }
                 }
             }
             
-            _mm_free(local_C);
+            if (local_C) {
+                _mm_free(local_C);
+            }
+        }
+
+        if (allocation_failed) {
+            std::cerr << "Thread-local memory allocation failed" << std::endl;
         }
 
         // Write the result to output file
