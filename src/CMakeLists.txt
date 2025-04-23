@@ -1,20 +1,45 @@
 add_library(studentlib main.cpp)
 target_include_directories(studentlib PUBLIC ${CMAKE_SOURCE_DIR}/include)
 
-# Optimized flags but removed some potentially problematic ones
+# Find NUMA library
+find_library(NUMA_LIBRARY numa)
+if(NUMA_LIBRARY)
+    message(STATUS "Found NUMA library: ${NUMA_LIBRARY}")
+    target_link_libraries(studentlib PRIVATE ${NUMA_LIBRARY})
+    target_compile_definitions(studentlib PRIVATE HAVE_NUMA)
+else()
+    message(STATUS "NUMA library not found, continuing without NUMA support")
+endif()
+
+# More aggressive optimization flags specifically for Intel Xeon Gold 6226R
 target_compile_options(studentlib PRIVATE 
-    -O3 
+    -O3
     -march=skylake-avx512
-    -mavx512f 
-    -mavx512dq 
-    -mavx512bw 
-    -mavx512vl 
+    -mtune=skylake-avx512
+    -mavx512f
+    -mavx512dq
+    -mavx512bw
+    -mavx512vl
     -mfma
+    -mpopcnt
+    -mbmi
+    -mbmi2
+    -ffp-contract=fast
     -funroll-loops
     -ftree-vectorize
+    -ftree-slp-vectorize
+    -ffast-math
     -finline-functions
+    -finline-limit=10000
     -fomit-frame-pointer
     -fopenmp-simd
+    -floop-block
+    -floop-interchange
+    -floop-strip-mine
+    -floop-nest-optimize
+    -fprefetch-loop-arrays
+    -fno-stack-protector
+    -fno-trapping-math
 )
 
 # Find and link with OpenMP
