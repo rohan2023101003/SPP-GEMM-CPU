@@ -103,8 +103,11 @@ namespace solution {
             _mm_prefetch(reinterpret_cast<const char*>(addr), _MM_HINT_T1);
         };
 
+        // Flag to track allocation failures
+        bool allocation_failed = false;
+
         // Main computation with multi-level blocking
-        #pragma omp parallel proc_bind(spread)
+        #pragma omp parallel
         {
             int thread_id = omp_get_thread_num();
             int numa_node = thread_id % num_numa_nodes;
@@ -114,73 +117,81 @@ namespace solution {
                 numa_run_on_node(numa_node);
             }
             
-            // Local accumulation buffer (aligned)
+            // Thread-local accumulation buffer (aligned)
             float* local_C = static_cast<float*>(_mm_malloc(sizeof(float) * MR * NR, alignment));
+            
+            // Check allocation success
             if (!local_C) {
-                std::cerr << "Thread local buffer allocation failed" << std::endl;
-                return;
+                #pragma omp critical
+                {
+                    allocation_failed = true;
+                    std::cerr << "Thread local buffer allocation failed" << std::endl;
+                }
             }
+            
+            // Only proceed if allocation succeeded
+            if (!allocation_failed) {
+                // Distribute blocks to threads in a NUMA-aware fashion
+                #pragma omp for schedule(dynamic, 1) collapse(2)
+                for (int i_block = 0; i_block < n; i_block += MC) {
+                    for (int j_block = 0; j_block < m; j_block += NC) {
+                        const int i_limit = std::min(i_block + MC, n);
+                        const int j_limit = std::min(j_block + NC, m);
+                        
+                        // Process MC×NC block
+                        for (int k_block = 0; k_block < k; k_block += KC) {
+                            const int k_limit = std::min(k_block + KC, k);
 
-            // Distribute blocks to threads in a NUMA-aware fashion
-            #pragma omp for schedule(dynamic, 1) collapse(2)
-            for (int i_block = 0; i_block < n; i_block += MC) {
-                for (int j_block = 0; j_block < m; j_block += NC) {
-                    const int i_limit = std::min(i_block + MC, n);
-                    const int j_limit = std::min(j_block + NC, m);
-                    
-                    // Process MC×NC block
-                    for (int k_block = 0; k_block < k; k_block += KC) {
-                        const int k_limit = std::min(k_block + KC, k);
-
-                        // Process micro-blocks within the MC×KC×NC block
-                        for (int i = i_block; i < i_limit; i += MR) {
-                            const int i_micro_limit = std::min(i + MR, i_limit);
-                            
-                            for (int j = j_block; j < j_limit; j += NR) {
-                                const int j_micro_limit = std::min(j + NR, j_limit);
+                            // Process micro-blocks within the MC×KC×NC block
+                            for (int i = i_block; i < i_limit; i += MR) {
+                                const int i_micro_limit = std::min(i + MR, i_limit);
                                 
-                                // Initialize local accumulation buffer to zero
-                                for (int local_i = 0; local_i < MR; local_i++) {
-                                    _mm512_storeu_ps(&local_C[local_i * NR], _mm512_setzero_ps());
-                                }
-                                
-                                // Process k dimension for this micro-block
-                                for (int kk = k_block; kk < k_limit; kk++) {
-                                    // Compute MR×NR micro-kernel
-                                    for (int ii = 0; ii < i_micro_limit - i; ii++) {
-                                        const float* a_ptr = &m1[(i + ii) * k + kk];
-                                        const float* b_ptr = &m2_transposed[j * k + kk];
-                                        
-                                        // Prefetch next A and B data
-                                        if (kk + 8 < k_limit) {
-                                            prefetch_a(&m1[(i + ii) * k + kk + 8]);
-                                            prefetch_b(&m2_transposed[j * k + kk + 8]);
-                                        }
-                                        
-                                        // Broadcast A element to vector register
-                                        __m512 a_vec = _mm512_set1_ps(a_ptr[0]);
-                                        
-                                        // Process full NR-element chunks with AVX-512
-                                        if (j + NR <= j_limit) {
-                                            __m512 b_vec = _mm512_loadu_ps(b_ptr);
-                                            __m512 c_vec = _mm512_loadu_ps(&local_C[ii * NR]);
-                                            c_vec = _mm512_fmadd_ps(a_vec, b_vec, c_vec);
-                                            _mm512_storeu_ps(&local_C[ii * NR], c_vec);
-                                        } 
-                                        // Handle edge case
-                                        else {
-                                            for (int jj = 0; jj < j_micro_limit - j; jj++) {
-                                                local_C[ii * NR + jj] += m1[(i + ii) * k + kk] * m2_transposed[(j + jj) * k + kk];
+                                for (int j = j_block; j < j_limit; j += NR) {
+                                    const int j_micro_limit = std::min(j + NR, j_limit);
+                                    
+                                    // Initialize local accumulation buffer to zero
+                                    for (int local_i = 0; local_i < MR; local_i++) {
+                                        _mm512_storeu_ps(&local_C[local_i * NR], _mm512_setzero_ps());
+                                    }
+                                    
+                                    // Process k dimension for this micro-block
+                                    for (int kk = k_block; kk < k_limit; kk++) {
+                                        // Compute MR×NR micro-kernel
+                                        for (int ii = 0; ii < i_micro_limit - i; ii++) {
+                                            const float* a_ptr = &m1[(i + ii) * k + kk];
+                                            const float* b_ptr = &m2_transposed[j * k + kk];
+                                            
+                                            // Prefetch next A and B data
+                                            if (kk + 8 < k_limit) {
+                                                prefetch_a(&m1[(i + ii) * k + kk + 8]);
+                                                prefetch_b(&m2_transposed[j * k + kk + 8]);
+                                            }
+                                            
+                                            // Broadcast A element to vector register
+                                            __m512 a_vec = _mm512_set1_ps(a_ptr[0]);
+                                            
+                                            // Process full NR-element chunks with AVX-512
+                                            if (j + NR <= j_limit) {
+                                                __m512 b_vec = _mm512_loadu_ps(b_ptr);
+                                                __m512 c_vec = _mm512_loadu_ps(&local_C[ii * NR]);
+                                                c_vec = _mm512_fmadd_ps(a_vec, b_vec, c_vec);
+                                                _mm512_storeu_ps(&local_C[ii * NR], c_vec);
+                                            } 
+                                            // Handle edge case
+                                            else {
+                                                for (int jj = 0; jj < j_micro_limit - j; jj++) {
+                                                    local_C[ii * NR + jj] += m1[(i + ii) * k + kk] * m2_transposed[(j + jj) * k + kk];
+                                                }
                                             }
                                         }
                                     }
-                                }
-                                
-                                // Write micro-block result back to the global result matrix
-                                for (int ii = 0; ii < i_micro_limit - i; ii++) {
-                                    for (int jj = 0; jj < j_micro_limit - j; jj++) {
-                                        #pragma omp atomic update
-                                        result[(i + ii) * m + (j + jj)] += local_C[ii * NR + jj];
+                                    
+                                    // Write micro-block result back to the global result matrix
+                                    for (int ii = 0; ii < i_micro_limit - i; ii++) {
+                                        for (int jj = 0; jj < j_micro_limit - j; jj++) {
+                                            #pragma omp atomic update
+                                            result[(i + ii) * m + (j + jj)] += local_C[ii * NR + jj];
+                                        }
                                     }
                                 }
                             }
