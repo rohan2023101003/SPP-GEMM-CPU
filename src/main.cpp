@@ -30,7 +30,7 @@ namespace solution {
             if (m1) _mm_free(m1);
             if (m2) _mm_free(m2);
             if (result) _mm_free(result);
-            return sol_path;
+            return std::string(); // Return empty string instead of bare return
         }
 
         m1_fs.read(reinterpret_cast<char*>(m1), sizeof(float) * n * k);
@@ -40,20 +40,19 @@ namespace solution {
         int num_threads = std::min(32, omp_get_max_threads());
         omp_set_num_threads(num_threads);
 
-        #pragma omp parallel for schedule(static)
+        #pragma omp parallel for simd
         for (int i = 0; i < n * m; ++i) result[i] = 0.0f;
 
-        const int MC = getenv("BLOCK_MC") ? atoi(getenv("BLOCK_MC")) : 128;
-        const int KC = getenv("BLOCK_KC") ? atoi(getenv("BLOCK_KC")) : 512;
-        const int NC = getenv("BLOCK_NC") ? atoi(getenv("BLOCK_NC")) : 1024;
+        const int MC = 128;
+        const int KC = 512;
+        const int NC = 1024;
 
         #pragma omp parallel
         {
             float* local_C = static_cast<float*>(_mm_malloc(sizeof(float) * MC * NC, alignment));
             if (!local_C) {
-                #pragma omp critical
                 std::cerr << "Thread-local memory allocation failed" << std::endl;
-                return;
+                return; // Exit parallel block, but avoids compilation error
             }
 
             #pragma omp for collapse(2) schedule(dynamic)
@@ -62,11 +61,7 @@ namespace solution {
                     int i_limit = std::min(i_block + MC, n);
                     int j_limit = std::min(j_block + NC, m);
 
-                    for (int i = 0; i < (i_limit - i_block); ++i) {
-                        for (int j = 0; j < (j_limit - j_block); ++j) {
-                            local_C[i * NC + j] = 0.0f;
-                        }
-                    }
+                    for (int i = 0; i < MC * NC; ++i) local_C[i] = 0.0f;
 
                     for (int k_block = 0; k_block < k; k_block += KC) {
                         int k_limit = std::min(k_block + KC, k);
@@ -78,21 +73,19 @@ namespace solution {
                                 float a_val = m1[i * k + kk];
                                 __m512 a_vec = _mm512_set1_ps(a_val);
 
-                                for (int j = j_block; j + 31 < j_limit; j += 32) {
+                                int j = j_block;
+                                for (; j + 31 < j_limit; j += 32) {
                                     __m512 b0 = _mm512_load_ps(&m2[kk * m + j]);
                                     __m512 b1 = _mm512_load_ps(&m2[kk * m + j + 16]);
-
                                     __m512 c0 = _mm512_load_ps(&local_C[local_i * NC + (j - j_block)]);
                                     __m512 c1 = _mm512_load_ps(&local_C[local_i * NC + (j - j_block + 16)]);
-
                                     c0 = _mm512_fmadd_ps(a_vec, b0, c0);
                                     c1 = _mm512_fmadd_ps(a_vec, b1, c1);
-
                                     _mm512_store_ps(&local_C[local_i * NC + (j - j_block)], c0);
                                     _mm512_store_ps(&local_C[local_i * NC + (j - j_block + 16)], c1);
                                 }
 
-                                for (int j = ((j_limit - j_block) & ~31) + j_block; j < j_limit; ++j) {
+                                for (; j < j_limit; ++j) {
                                     local_C[local_i * NC + (j - j_block)] += a_val * m2[kk * m + j];
                                 }
                             }
