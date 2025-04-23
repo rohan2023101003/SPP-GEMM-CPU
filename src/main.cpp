@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <atomic>
 
 namespace solution {
     std::string compute(const std::string &m1_path, const std::string &m2_path, int n, int k, int m) {
@@ -30,7 +31,7 @@ namespace solution {
             if (m1) _mm_free(m1);
             if (m2) _mm_free(m2);
             if (result) _mm_free(result);
-            return std::string(); // Return empty string instead of bare return
+            return "";
         }
 
         m1_fs.read(reinterpret_cast<char*>(m1), sizeof(float) * n * k);
@@ -43,65 +44,68 @@ namespace solution {
         #pragma omp parallel for simd
         for (int i = 0; i < n * m; ++i) result[i] = 0.0f;
 
-        const int MC = 128;
-        const int KC = 512;
-        const int NC = 1024;
+        const int MC = 128, KC = 512, NC = 1024;
+        std::atomic<bool> allocation_failed(false);
 
         #pragma omp parallel
         {
             float* local_C = static_cast<float*>(_mm_malloc(sizeof(float) * MC * NC, alignment));
             if (!local_C) {
-                std::cerr << "Thread-local memory allocation failed" << std::endl;
-                return; // Exit parallel block, but avoids compilation error
+                allocation_failed.store(true);
             }
 
-            #pragma omp for collapse(2) schedule(dynamic)
-            for (int i_block = 0; i_block < n; i_block += MC) {
-                for (int j_block = 0; j_block < m; j_block += NC) {
-                    int i_limit = std::min(i_block + MC, n);
-                    int j_limit = std::min(j_block + NC, m);
+            #pragma omp barrier
+            if (!allocation_failed.load()) {
+                #pragma omp for collapse(2) schedule(dynamic)
+                for (int i_block = 0; i_block < n; i_block += MC) {
+                    for (int j_block = 0; j_block < m; j_block += NC) {
+                        int i_limit = std::min(i_block + MC, n);
+                        int j_limit = std::min(j_block + NC, m);
 
-                    for (int i = 0; i < MC * NC; ++i) local_C[i] = 0.0f;
+                        for (int i = 0; i < MC * NC; ++i) local_C[i] = 0.0f;
 
-                    for (int k_block = 0; k_block < k; k_block += KC) {
-                        int k_limit = std::min(k_block + KC, k);
-
-                        for (int i = i_block; i < i_limit; ++i) {
-                            int local_i = i - i_block;
-
-                            for (int kk = k_block; kk < k_limit; ++kk) {
-                                float a_val = m1[i * k + kk];
-                                __m512 a_vec = _mm512_set1_ps(a_val);
-
-                                int j = j_block;
-                                for (; j + 31 < j_limit; j += 32) {
-                                    __m512 b0 = _mm512_load_ps(&m2[kk * m + j]);
-                                    __m512 b1 = _mm512_load_ps(&m2[kk * m + j + 16]);
-                                    __m512 c0 = _mm512_load_ps(&local_C[local_i * NC + (j - j_block)]);
-                                    __m512 c1 = _mm512_load_ps(&local_C[local_i * NC + (j - j_block + 16)]);
-                                    c0 = _mm512_fmadd_ps(a_vec, b0, c0);
-                                    c1 = _mm512_fmadd_ps(a_vec, b1, c1);
-                                    _mm512_store_ps(&local_C[local_i * NC + (j - j_block)], c0);
-                                    _mm512_store_ps(&local_C[local_i * NC + (j - j_block + 16)], c1);
-                                }
-
-                                for (; j < j_limit; ++j) {
-                                    local_C[local_i * NC + (j - j_block)] += a_val * m2[kk * m + j];
+                        for (int k_block = 0; k_block < k; k_block += KC) {
+                            int k_limit = std::min(k_block + KC, k);
+                            for (int i = i_block; i < i_limit; ++i) {
+                                int local_i = i - i_block;
+                                for (int kk = k_block; kk < k_limit; ++kk) {
+                                    float a_val = m1[i * k + kk];
+                                    __m512 a_vec = _mm512_set1_ps(a_val);
+                                    int j = j_block;
+                                    for (; j + 31 < j_limit; j += 32) {
+                                        __m512 b0 = _mm512_load_ps(&m2[kk * m + j]);
+                                        __m512 b1 = _mm512_load_ps(&m2[kk * m + j + 16]);
+                                        __m512 c0 = _mm512_load_ps(&local_C[local_i * NC + (j - j_block)]);
+                                        __m512 c1 = _mm512_load_ps(&local_C[local_i * NC + (j - j_block + 16)]);
+                                        c0 = _mm512_fmadd_ps(a_vec, b0, c0);
+                                        c1 = _mm512_fmadd_ps(a_vec, b1, c1);
+                                        _mm512_store_ps(&local_C[local_i * NC + (j - j_block)], c0);
+                                        _mm512_store_ps(&local_C[local_i * NC + (j - j_block + 16)], c1);
+                                    }
+                                    for (; j < j_limit; ++j) {
+                                        local_C[local_i * NC + (j - j_block)] += a_val * m2[kk * m + j];
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    for (int i = i_block; i < i_limit; ++i) {
-                        int local_i = i - i_block;
-                        for (int j = j_block; j < j_limit; ++j) {
-                            result[i * m + j] += local_C[local_i * NC + (j - j_block)];
+                        for (int i = i_block; i < i_limit; ++i) {
+                            int local_i = i - i_block;
+                            for (int j = j_block; j < j_limit; ++j) {
+                                result[i * m + j] += local_C[local_i * NC + (j - j_block)];
+                            }
                         }
                     }
                 }
             }
 
-            _mm_free(local_C);
+            if (local_C) _mm_free(local_C);
+        }
+
+        if (allocation_failed.load()) {
+            std::cerr << "One or more threads failed memory allocation." << std::endl;
+            _mm_free(m1); _mm_free(m2); _mm_free(result);
+            return "";
         }
 
         sol_fs.write(reinterpret_cast<const char*>(result), sizeof(float) * n * m);
