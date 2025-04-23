@@ -11,7 +11,7 @@ else()
     message(STATUS "NUMA library not found, continuing without NUMA support")
 endif()
 
-# More aggressive optimization flags specifically for Intel Xeon Gold 6226R
+# More balanced optimization flags for both speed and accuracy
 target_compile_options(studentlib PRIVATE 
     -O3
     -march=skylake-avx512
@@ -24,22 +24,16 @@ target_compile_options(studentlib PRIVATE
     -mpopcnt
     -mbmi
     -mbmi2
-    -ffp-contract=fast
     -funroll-loops
     -ftree-vectorize
     -ftree-slp-vectorize
-    -ffast-math
     -finline-functions
-    -finline-limit=10000
     -fomit-frame-pointer
     -fopenmp-simd
     -floop-block
     -floop-interchange
     -floop-strip-mine
-    -floop-nest-optimize
     -fprefetch-loop-arrays
-    -fno-stack-protector
-    -fno-trapping-math
 )
 
 # Find and link with OpenMP
